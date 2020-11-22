@@ -47,18 +47,11 @@ static struct ble_gatt_svc_def espServices[ MAX_SERVICES + 1 ];
 static BTService_t * afrServices[ MAX_SERVICES ];
 static uint16_t serviceCnt = 0;
 static SemaphoreHandle_t xSem;
-static bool semInited;
-bool xSemLock = 0;
 uint16_t gattOffset = 0;
 
 void prvGattGetSemaphore()
 {
     xSemaphoreTake( xSem, portMAX_DELAY );
-}
-
-void prvGattGiveSemaphore()
-{
-    xSemaphoreGive( xSem );
 }
 
 void * pvPortCalloc( size_t xNum,
@@ -81,7 +74,8 @@ uint32_t ulGattServerIFhandle = 0;
 static uint16_t prvCountCharacteristics( BTService_t * pxService );
 static uint16_t prvCountDescriptor( BTService_t * pxService,
                                     uint16_t startHandle );
-static void prvCleanupService( struct ble_gatt_svc_def * pSvc );
+static void prvCleanupService( BTService_t * pxService,
+                               struct ble_gatt_svc_def * pSvc );
 static BTStatus_t prvBTRegisterServer( BTUuid_t * pxUuid );
 static BTStatus_t prvBTUnregisterServer( uint8_t ucServerIf );
 static BTStatus_t prvBTGattServerInit( const BTGattServerCallbacks_t * pxCallbacks );
@@ -128,12 +122,6 @@ static BTStatus_t prvBTSendResponse( uint16_t usConnId,
                                      BTStatus_t xStatus,
                                      BTGattResponse_t * pxResponse );
 
-static BTStatus_t prvBTConfigureMtu( uint8_t ucServerIf,
-                                     uint16_t usMtu );
-
-
-void vESPBTGATTServerCleanup( void );
-
 static BTGattServerInterface_t xGATTserverInterface =
 {
     .pxRegisterServer     = prvBTRegisterServer,
@@ -151,8 +139,7 @@ static BTGattServerInterface_t xGATTserverInterface =
     .pxStopService        = prvBTStopService,
     .pxDeleteService      = prvBTDeleteService,
     .pxSendIndication     = prvBTSendIndication,
-    .pxSendResponse       = prvBTSendResponse,
-    .pxConfigureMtu       = prvBTConfigureMtu
+    .pxSendResponse       = prvBTSendResponse
 };
 
 /*-----------------------------------------------------------*/
@@ -367,10 +354,8 @@ static int prvGATTCharAccessCb( uint16_t conn_handle,
 
             if( xGattServerCb.pxRequestReadCb != NULL )
             {
-                xSemLock = 1;
                 xGattServerCb.pxRequestReadCb( conn_handle, ( uint32_t ) ctxt, ( BTBdaddr_t * ) desc.peer_id_addr.val, attr_handle - gattOffset, 0 );
                 prvGattGetSemaphore();
-                xSemLock = 0;
             }
 
             break;
@@ -386,7 +371,6 @@ static int prvGATTCharAccessCb( uint16_t conn_handle,
 
             ESP_LOGD( TAG, "In write for handle %d and len %d", attr_handle, out_len );
             trans_id = ( uint32_t ) ctxt;
-
             if( xGattServerCb.pxRequestWriteCb != NULL )
             {
                 if( ( ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR ) && ( ctxt->chr->flags & BLE_GATT_CHR_F_WRITE_NO_RSP ) )
@@ -394,17 +378,15 @@ static int prvGATTCharAccessCb( uint16_t conn_handle,
                     need_rsp = 0;
                     trans_id = 0;
                 }
-                else
-                {
-                    xSemLock = 1;
-                }
 
-                xGattServerCb.pxRequestWriteCb( conn_handle, trans_id, ( BTBdaddr_t * ) desc.peer_id_addr.val, attr_handle - gattOffset, 0, out_len, need_rsp, 0, dst_buf );
+                if( xGattServerCb.pxRequestWriteCb != NULL )
+                {
+                    xGattServerCb.pxRequestWriteCb( conn_handle, trans_id, ( BTBdaddr_t * ) desc.peer_id_addr.val, attr_handle - gattOffset, 0, out_len, need_rsp, 0, dst_buf );
+                }
 
                 if( need_rsp )
                 {
                     prvGattGetSemaphore();
-                    xSemLock = 0;
                 }
             }
 
@@ -474,7 +456,6 @@ BTStatus_t prvBTGattServerInit( const BTGattServerCallbacks_t * pxCallbacks )
     BTStatus_t xStatus = eBTStatusSuccess;
 
     ble_hs_cfg.gatts_register_cb = prvGATTRegisterCb;
-    serviceCnt = 0;
 
     memset( espServices, 0, sizeof( struct ble_gatt_svc_def ) * ( MAX_SERVICES + 1 ) );
 
@@ -488,43 +469,7 @@ BTStatus_t prvBTGattServerInit( const BTGattServerCallbacks_t * pxCallbacks )
     }
 
     xSem = xSemaphoreCreateBinary();
-
-    if( xSem != NULL )
-    {
-        semInited = true;
-    }
-    else
-    {
-        xStatus = eBTStatusNoMem;
-    }
-
     return xStatus;
-}
-/*-------------------------------------------------------------------------------------*/
-void vESPBTGATTServerCleanup( void )
-{
-    size_t index;
-
-    if( serviceCnt > 0 )
-    {
-        ble_gatts_stop();
-
-        for( index = 0; index < serviceCnt; index++ )
-        {
-            prvCleanupService( &espServices[ index ] );
-        }
-
-        serviceCnt = 0;
-
-        memset( espServices, 0, sizeof( struct ble_gatt_svc_def ) * ( MAX_SERVICES + 1 ) );
-        memset( afrServices, 0, sizeof( struct BTService_t * ) * ( MAX_SERVICES + 1 ) );
-    }
-
-    if( semInited )
-    {
-        vSemaphoreDelete( xSem );
-        semInited = false;
-    }
 }
 
 /*-----------------------------------------------------------*/
@@ -679,11 +624,10 @@ BTStatus_t prvBTSendIndication( uint8_t ucServerIf,
 
 static bool prvValidGattRequest()
 {
-    if( xSemLock )
+    if( uxSemaphoreGetCount( xSem ) == 0 )
     {
         return true;
     }
-
     return false;
 }
 
@@ -692,7 +636,7 @@ BTStatus_t prvBTSendResponse( uint16_t usConnId,
                               BTStatus_t xStatus,
                               BTGattResponse_t * pxResponse )
 {
-    struct ble_gatt_access_ctxt * ctxt = ( struct ble_gatt_access_ctxt * ) ulTransId;
+    struct ble_gatt_access_ctxt *ctxt = ( struct ble_gatt_access_ctxt * )ulTransId;
 
     BTStatus_t xReturnStatus = eBTStatusSuccess;
 
@@ -708,12 +652,12 @@ BTStatus_t prvBTSendResponse( uint16_t usConnId,
                 xReturnStatus = eBTStatusFail;
             }
         }
-
-        prvGattGiveSemaphore();
+        xSemaphoreGive( xSem );
     }
     else
     {
         xStatus = eBTStatusFail;
+        xReturnStatus = eBTStatusFail;
     }
 
     if( xGattServerCb.pxResponseConfirmationCb != NULL )
@@ -766,41 +710,69 @@ static uint16_t prvCountDescriptor( BTService_t * pxService,
  *
  * Since all memory is initialized to 0, that function can be called to clean even half created service.
  */
-static void prvCleanupService( struct ble_gatt_svc_def * pSvc )
+static void prvCleanupService( BTService_t * pxService,
+                               struct ble_gatt_svc_def * pSvc )
 {
-    const struct ble_gatt_dsc_def * pDescriptor;
-    const struct ble_gatt_chr_def * pCharacteristic;
-    size_t cIndex, dIndex;
+    uint16_t charCount;
+    uint16_t dscrCount;
+    struct ble_gatt_dsc_def * pDescriptors;
+    uint16_t index;
+
+    charCount = 0;
+    dscrCount = 0;
 
     if( pSvc->uuid != NULL )
     {
         vPortFree( ( void * ) pSvc->uuid );
     }
 
-    if( pSvc->characteristics != NULL )
+    for( index = 0; index < pxService->xNumberOfAttributes; index++ )
     {
-        for( cIndex = 0; pSvc->characteristics[ cIndex ].uuid != NULL; cIndex++ )
+        switch( pxService->pxBLEAttributes[ index ].xAttributeType )
         {
-            pCharacteristic = &pSvc->characteristics[ cIndex ];
-            vPortFree( ( void * ) pCharacteristic->uuid );
+            case eBTDbCharacteristic:
 
-            if( pCharacteristic->descriptors != NULL )
-            {
-                for( dIndex = 0; pCharacteristic->descriptors[ dIndex ].uuid != NULL; dIndex++ )
+                /* Allocate memory for UUID and copies it. */
+                if( pSvc->characteristics[ charCount ].uuid != NULL )
                 {
-                    pDescriptor = &pCharacteristic->descriptors[ dIndex ];
-                    vPortFree( ( void * ) pDescriptor->uuid );
+                    vPortFree( ( void * ) pSvc->characteristics[ charCount ].uuid );
                 }
 
-                vPortFree( ( void * ) pCharacteristic->descriptors );
-            }
-        }
+                /* If last characteristic had a descriptor array, we can now remove it. */
+                if( dscrCount != 0 )
+                {
+                    if( pSvc->characteristics[ charCount - 1 ].descriptors != NULL )
+                    {
+                        vPortFree( ( void * ) pSvc->characteristics[ charCount - 1 ].descriptors );
+                    }
+                }
 
-        vPortFree( ( void * ) pSvc->characteristics );
+                charCount++;
+                dscrCount = 0;
+                break;
+
+            case eBTDbDescriptor:
+                pDescriptors = &pSvc->characteristics[ charCount - 1 ].descriptors[ dscrCount ];
+
+                if( pDescriptors->uuid != NULL )
+                {
+                    vPortFree( ( void * ) pDescriptors->uuid );
+                }
+
+                dscrCount++;
+                break;
+
+            default:
+                break;
+        }
     }
 
-    memset( pSvc, 0x00, sizeof( struct ble_gatt_svc_def ) );
+    if( pSvc->characteristics != NULL )
+    {
+        vPortFree( ( void * ) pSvc->characteristics );
+    }
 }
+
 
 /* @brief Simple function that creates a full service in one go.
  * The function is big because of error checking but in reality it only does the following:
@@ -883,7 +855,7 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
         if( pSvc->uuid == NULL )
         {
             configPRINTF( ( "Could not allocate memory for service UUID \n" ) );
-            prvCleanupService( pSvc );
+            prvCleanupService( pxService, pSvc );
             xStatus = eBTStatusNoMem;
         }
         else
@@ -893,7 +865,7 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
             if( pCharacteristics == NULL )
             {
                 configPRINTF( ( "Could not allocate memory for  characteristic array \n" ) );
-                prvCleanupService( pSvc );
+                prvCleanupService( pxService, pSvc );
                 xStatus = eBTStatusNoMem;
             }
 
@@ -963,7 +935,7 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
                     pDescriptors->uuid = uuid;
                     pDescriptors->arg = ( void * ) pxService;
                     pDescriptors->access_cb = prvGATTCharAccessCb;
-                    pDescriptors->min_key_size = IOT_BLE_ENCRYPT_KEY_SIZE_MIN;
+                    pDescriptors->min_key_size  = IOT_BLE_ENCRYPT_KEY_SIZE_MIN;
                     pDescriptors->att_flags = prvAFRToESPDescPerm( pxService->pxBLEAttributes[ index ].xCharacteristicDescr.xPermissions );
 
                     dscrCount++;
@@ -978,7 +950,7 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
             if( xStatus != eBTStatusSuccess )
             {
                 configPRINTF( ( "Failed to allocate memory during Attribute creation\n" ) );
-                prvCleanupService( pSvc );
+                prvCleanupService( pxService, pSvc );
                 break;
             }
         }
@@ -993,7 +965,7 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
 
         if( ble_gatts_count_cfg( espServices ) != 0 )
         {
-            prvCleanupService( pSvc );
+            prvCleanupService( pxService, pSvc );
             configPRINTF( ( "Failed to adjust host configuration\n" ) );
             xStatus = eBTStatusFail;
         }
@@ -1003,7 +975,7 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
     {
         if( ble_gatts_add_svcs( espServices ) != 0 )
         {
-            prvCleanupService( pSvc );
+            prvCleanupService( pxService, pSvc );
             configPRINTF( ( "Failed to add service\n" ) );
             xStatus = eBTStatusFail;
         }
@@ -1013,7 +985,7 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
     {
         if( ble_gatts_start() != 0 )
         {
-            prvCleanupService( pSvc );
+            prvCleanupService( pxService, pSvc );
             configPRINTF( ( "Failed to start service\n" ) );
             xStatus = eBTStatusFail;
         }
@@ -1021,22 +993,6 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
         {
             serviceCnt++;
         }
-    }
-
-    return xStatus;
-}
-
-static BTStatus_t prvBTConfigureMtu( uint8_t ucServerIf,
-                                     uint16_t usMtu )
-{
-    BTStatus_t xStatus = eBTStatusSuccess;
-    esp_err_t xESPStatus;
-
-    xESPStatus = ble_att_set_preferred_mtu( usMtu );
-
-    if( xESPStatus != ESP_OK )
-    {
-        xStatus = eBTStatusFail;
     }
 
     return xStatus;

@@ -1,6 +1,6 @@
 /*
-* FreeRTOS
- * Copyright (C) 2020 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ * Amazon FreeRTOS
+ * Copyright (C) 2018 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -92,9 +92,6 @@ BTStatus_t prvBTConfigClear();
 BTStatus_t prvBTReadRssi( const BTBdaddr_t * pxBdAddr );
 BTStatus_t prvBTGetTxpower( const BTBdaddr_t * pxBdAddr,
                             BTTransport_t xTransport );
-
-extern void vESPBTGATTServerCleanup( void );
-
 const void * prvGetClassicAdapter();
 const void * prvGetLeAdapter();
 
@@ -574,8 +571,6 @@ BTStatus_t prvBtManagerCleanup()
 {
     esp_err_t xRet;
     BTStatus_t xStatus = eBTStatusSuccess;
-
-    vESPBTGATTServerCleanup();
 
     xRet = esp_nimble_hci_and_controller_deinit();
 

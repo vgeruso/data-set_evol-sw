@@ -92,9 +92,6 @@ BTStatus_t prvBTConfigClear();
 BTStatus_t prvBTReadRssi( const BTBdaddr_t * pxBdAddr );
 BTStatus_t prvBTGetTxpower( const BTBdaddr_t * pxBdAddr,
                             BTTransport_t xTransport );
-
-extern void vESPBTGATTServerCleanup( void );
-
 const void * prvGetClassicAdapter();
 const void * prvGetLeAdapter();
 
@@ -246,10 +243,8 @@ int prvGAPeventHandler( struct ble_gap_event * event,
                 {
                     xStatus = eBTStatusFail;
                 }
-
-                xBTBleAdapterCallbacks.pxAdvStatusCb( xStatus, 0, false );
+                xBTBleAdapterCallbacks.pxAdvStatusCb( xStatus, ulGattServerIFhandle, false );
             }
-
             return 0;
 
         case BLE_GAP_EVENT_PAIRING_REQUEST:
@@ -416,15 +411,13 @@ int prvGAPeventHandler( struct ble_gap_event * event,
                 }
             }
 
-            if( ( event->subscribe.reason != BLE_GAP_SUBSCRIBE_REASON_TERM ) && ( event->subscribe.attr_handle > gattOffset ) )
+            if( event->subscribe.attr_handle > gattOffset )
             {
                 if( xGattServerCb.pxRequestWriteCb != NULL )
                 {
                     ctxt.op = BLE_GATT_ACCESS_OP_WRITE_DSC;
-                    xSemLock = 1;
                     xGattServerCb.pxRequestWriteCb( event->subscribe.conn_handle, ( uint32_t ) &ctxt, ( BTBdaddr_t * ) desc.peer_id_addr.val, event->subscribe.attr_handle - gattOffset + 1, 0, sizeof( ccc_val ), 1, 0, ( uint8_t * ) &ccc_val );
                     prvGattGetSemaphore();
-                    xSemLock = 0;
                 }
             }
 
@@ -565,6 +558,15 @@ BTStatus_t prvBTManagerInit( const BTCallbacks_t * pxCallbacks )
         xStatus = eBTStatusFail;
     }
 
+    if( xStatus == eBTStatusSuccess )
+    {
+        ble_hs_cfg.reset_cb = bleprph_on_reset;
+        ble_hs_cfg.sync_cb = bleprph_on_sync;
+        ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+
+        ble_store_config_init();
+    }
+
     return xStatus;
 }
 
@@ -574,8 +576,6 @@ BTStatus_t prvBtManagerCleanup()
 {
     esp_err_t xRet;
     BTStatus_t xStatus = eBTStatusSuccess;
-
-    vESPBTGATTServerCleanup();
 
     xRet = esp_nimble_hci_and_controller_deinit();
 
@@ -593,15 +593,7 @@ BTStatus_t prvBtManagerCleanup()
 BTStatus_t prvBTEnable( uint8_t ucGuestMode )
 {
     nimble_port_init();
-
-    ble_hs_cfg.reset_cb = bleprph_on_reset;
-    ble_hs_cfg.sync_cb = bleprph_on_sync;
-
-    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    ble_store_config_init();
-
     nimble_port_freertos_init( ble_host_task );
-
     return eBTStatusSuccess;
 }
 
@@ -690,7 +682,7 @@ BTStatus_t prvGetBondableDeviceList( void )
         xStatus = eBTStatusFail;
     }
 
-    xBondedDevices.xLen = usNbDevices * sizeof( BTBdaddr_t );
+    xBondedDevices.xLen = usNbDevices;
     xBondedDevices.xType = eBTpropertyAdapterBondedDevices;
 
     if( xBTCallbacks.pxAdapterPropertiesCb != NULL )

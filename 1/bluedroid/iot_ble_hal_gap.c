@@ -350,11 +350,6 @@ BTStatus_t prvBTBleAdapterInit( const BTBleAdapterCallbacks_t * pxCallbacks )
 
     if( xESPstatus == ESP_OK )
     {
-        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_MIN_KEY_SIZE, &xKeySize, sizeof( uint8_t ) );
-    }
-
-    if( xESPstatus == ESP_OK )
-    {
         xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_SET_INIT_KEY, &xInitKey, sizeof( uint8_t ) );
     }
 
@@ -751,7 +746,7 @@ BTStatus_t prvBTSetAdvData( uint8_t ucAdapterIf,
 
     if( ( pcServiceData != NULL ) && ( xStatus == eBTStatusSuccess ) )
     {
-        xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_SERVICE_DATA, ( uint8_t * ) pcServiceData, usServiceDataLen );
+        xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_128SERVICE_DATA, ( uint8_t * ) pcServiceData, usServiceDataLen );
     }
 
     if( ( xNbServices != 0 ) && ( xStatus == eBTStatusSuccess ) )

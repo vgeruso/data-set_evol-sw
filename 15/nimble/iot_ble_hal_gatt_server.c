@@ -43,6 +43,8 @@
 #define APP_ID          0
 #define MAX_SERVICES    20
 
+#define BLE_GATT_DSC_CLT_CFG_UUID128 0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x02, 0x29, 0x00, 0x00
+
 static struct ble_gatt_svc_def espServices[ MAX_SERVICES + 1 ];
 static BTService_t * afrServices[ MAX_SERVICES ];
 static uint16_t serviceCnt = 0;
@@ -261,6 +263,21 @@ static uint8_t prvAFRToESPDescPerm( BTCharPermissions_t xPermissions )
 
     /*fixme: eBTPermWriteSigned eBTPermWriteSignedMitm to be handled */
     return flags;
+}
+
+static struct ble_gatt_svc_def * prvAFRtoESPIncludedServices( BTIncludedService_t xIncludedService )
+{
+    uint16_t index;
+
+    for ( index = 0; index < serviceCnt; index++ )
+    {
+        if( memcmp( xIncludedService.pxPtrToService, afrServices[ index ], sizeof( BTService_t ) ) == 0 )
+        {
+            return &espServices[ index ];
+        }
+    }
+
+    return NULL;
 }
 
 ble_uuid_t * prvCopytoESPUUID( BTUuid_t * pxUuid,
@@ -512,6 +529,7 @@ void vESPBTGATTServerCleanup( void )
         for( index = 0; index < serviceCnt; index++ )
         {
             prvCleanupService( &espServices[ index ] );
+            vPortFree( ( void * ) afrServices[ index ] );
         }
 
         serviceCnt = 0;
@@ -598,7 +616,27 @@ BTStatus_t prvBTStartService( uint8_t ucServerIf,
                               uint16_t usServiceHandle,
                               BTTransport_t xTransport )
 {
-    return eBTStatusUnsupported;
+    BTStatus_t xStatus = eBTStatusFail;
+    uint16_t index;
+
+    /* GATT Service is supposed to start in prvAddServiceBlob, we just
+     * check if handle is matching with the one populated in
+     * prvAddServiceBlob for each service */
+    for( index = 0; index < serviceCnt; index++ )
+    {
+        if ( usServiceHandle == afrServices[ index ]->pusHandlesBuffer[ 0 ] )
+        {
+            xStatus = eBTStatusSuccess;
+            break;
+        }
+    }
+
+    if( xGattServerCb.pxServiceStartedCb != NULL )
+    {
+        xGattServerCb.pxServiceStartedCb( xStatus, ucServerIf, usServiceHandle );
+    }
+
+    return xStatus;
 }
 
 /*-----------------------------------------------------------*/
@@ -725,6 +763,22 @@ BTStatus_t prvBTSendResponse( uint16_t usConnId,
 }
 
 /*-----------------------------------------------------------*/
+static uint16_t prvCountIncludedServices( BTService_t * pxService )
+{
+    uint16_t nbIncludedServices = 0;
+    uint16_t index;
+
+    for( index = 0; index < pxService->xNumberOfAttributes; index++ )
+    {
+        if( pxService->pxBLEAttributes[ index ].xAttributeType == eBTDbIncludedService )
+        {
+            nbIncludedServices++;
+        }
+    }
+
+    return nbIncludedServices;
+}
+
 static uint16_t prvCountCharacteristics( BTService_t * pxService )
 {
     uint16_t nbCharacteristics = 0;
@@ -799,6 +853,11 @@ static void prvCleanupService( struct ble_gatt_svc_def * pSvc )
         vPortFree( ( void * ) pSvc->characteristics );
     }
 
+    if ( pSvc->includes != NULL )
+    {
+        vPortFree( ( void * ) pSvc->includes );
+    }
+
     memset( pSvc, 0x00, sizeof( struct ble_gatt_svc_def ) );
 }
 
@@ -815,13 +874,16 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
     uint16_t index;
     uint16_t charCount;
     uint16_t dscrCount;
+    uint16_t IncludedSvcCount;
     struct ble_gatt_chr_def * pCharacteristics = NULL;
+    struct ble_gatt_svc_def ** pIncludedServices = NULL;
     struct ble_gatt_dsc_def * pDescriptors = NULL;
     BTStatus_t xStatus = eBTStatusSuccess;
     ble_uuid_t * uuid;
     struct ble_gatt_svc_def * pSvc = NULL;
     uint16_t handle = 0;
     uint16_t attributeCount = 0;
+    BTService_t * afrFullService = NULL;
 
     if( ( pxService == 0 ) || ( pxService->xNumberOfAttributes == 0 ) )
     {
@@ -834,7 +896,17 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
         if( serviceCnt < MAX_SERVICES )
         {
             pSvc = &espServices[ serviceCnt ];
-            afrServices[ serviceCnt ] = pxService;
+            afrFullService = pvPortCalloc( 1, sizeof( BTService_t ) );
+            if ( afrFullService == NULL )
+            {
+                xStatus = eBTStatusNoMem;
+            }
+            else
+            {
+                memcpy( afrFullService, pxService, sizeof( BTService_t ) );
+            }
+
+            afrServices[ serviceCnt ] = afrFullService;
         }
         else
         {
@@ -892,15 +964,24 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
 
             if( pCharacteristics == NULL )
             {
-                configPRINTF( ( "Could not allocate memory for  characteristic array \n" ) );
+                configPRINTF( ( "Could not allocate memory for characteristic array \n" ) );
                 prvCleanupService( pSvc );
                 xStatus = eBTStatusNoMem;
             }
 
             pSvc->characteristics = pCharacteristics;
-            pSvc->includes = NULL;
+            pIncludedServices = pvPortCalloc( prvCountIncludedServices( pxService ) + 1, sizeof( struct ble_gatt_svc_def * ) );
+
+            if( pIncludedServices == NULL )
+            {
+                configPRINTF( ( "Could not allocate memory for included services \n" ) );
+                prvCleanupService( pSvc );
+                xStatus = eBTStatusNoMem;
+            }
+            pSvc->includes = ( const struct ble_gatt_svc_def ** ) pIncludedServices;
             charCount = 0;
             dscrCount = 0;
+            IncludedSvcCount = 0;
         }
     }
 
@@ -938,6 +1019,8 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
                 case eBTDbIncludedService:
                     handle += 1;
                     pxService->pusHandlesBuffer[ attributeCount++ ] = handle;
+                    pIncludedServices[ IncludedSvcCount ] = prvAFRtoESPIncludedServices( pxService->pxBLEAttributes[ index ].xIncludedService );
+                    IncludedSvcCount++;
                     break;
 
                 case eBTDbDescriptor:
@@ -952,8 +1035,10 @@ BTStatus_t prvAddServiceBlob( uint8_t ucServerIf,
                     }
 
                     /* Characteristic descriptors are automatically added, so no need to add them here, otherwise they will be declared twice. */
-                    if( ble_uuid_cmp( uuid, BLE_UUID16_DECLARE( BLE_GATT_DSC_CLT_CFG_UUID16 ) ) == 0 )
-                    {
+                    if (((uuid->type == BLE_UUID_TYPE_16) &&
+                         (ble_uuid_cmp( uuid, BLE_UUID16_DECLARE( BLE_GATT_DSC_CLT_CFG_UUID16 ) ) == 0 )) ||
+                        ((uuid->type == BLE_UUID_TYPE_128) &&
+                         (ble_uuid_cmp( uuid, BLE_UUID128_DECLARE( BLE_GATT_DSC_CLT_CFG_UUID128) ) == 0))) {
                         continue;
                     }
 

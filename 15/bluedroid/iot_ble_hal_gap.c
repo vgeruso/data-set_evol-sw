@@ -1,6 +1,6 @@
 /*
- * Amazon FreeRTOS
- * Copyright (C) 2018 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+* FreeRTOS
+ * Copyright (C) 2020 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -24,26 +24,34 @@
  */
 
 /**
- * @file aws_ble_hal_gap.c
+ * @file iot_ble_hal_gap.c
  * @brief Hardware Abstraction Layer for GAP ble stack.
  */
-
+#include "iot_config.h"
 #include <stddef.h>
 #include <string.h>
-#include "FreeRTOS.h"
-#include "host/ble_hs.h"
-#include "host/ble_gap.h"
-#include "host/ble_uuid.h"
-#include "services/gap/ble_svc_gap.h"
+#include "esp_bt.h"
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_gatt_common_api.h"
+#include "iot_ble_config.h"
 #include "bt_hal_manager_adapter_ble.h"
 #include "bt_hal_manager.h"
 #include "bt_hal_gatt_server.h"
 #include "iot_ble_hal_internals.h"
-#include "iot_ble_config.h"
+
+/* Configure logs for the functions in this file. */
+#ifdef IOT_LOG_LEVEL_GLOBAL
+    #define LIBRARY_LOG_LEVEL    IOT_LOG_LEVEL_GLOBAL
+#else
+    #define LIBRARY_LOG_LEVEL    IOT_LOG_NONE
+#endif
+
+#define LIBRARY_LOG_NAME         ( "BLE_HAL" )
+#include "iot_logging_setup.h"
 
 BTBleAdapterCallbacks_t xBTBleAdapterCallbacks;
-static struct ble_gap_adv_params xAdv_params;
-static bool xPrivacy;
+static esp_ble_adv_params_t xAdv_params;
 
 static BTStatus_t prvBTBleAdapterInit( const BTBleAdapterCallbacks_t * pxCallbacks );
 static BTStatus_t prvBTRegisterBleApp( BTUuid_t * pxAppUuid );
@@ -105,9 +113,9 @@ static BTStatus_t prvBTSetScanParameters( uint8_t ucAdapterIf,
                                           uint32_t ulScanInterval,
                                           uint32_t ulScanWindow );
 static BTStatus_t prvBTMultiAdvEnable( uint8_t ucAdapterIf,
-                                       BTGattAdvertismentParams_t * xAdvParams );
+                                       BTGattAdvertismentParams_t * pxAdvParams );
 static BTStatus_t prvBTMultiAdvUpdate( uint8_t ucAdapterIf,
-                                       BTGattAdvertismentParams_t * advParams );
+                                       BTGattAdvertismentParams_t * pxAdvParams );
 static BTStatus_t prvBTMultiAdvSetInstData( uint8_t ucAdapterIf,
                                             bool bSetScanRsp,
                                             bool bIncludeName,
@@ -181,35 +189,50 @@ BTBleAdapter_t xBTLeAdapter =
 };
 
 /*-----------------------------------------------------------*/
-
-uint8_t prvConvertPropertiesToESPIO( BTIOtypes_t xPropertyIO )
+esp_ble_auth_req_t prvConvertPropertiesToESPAuth( bool bBondableFlag )
 {
-    uint8_t xIocap;
+    esp_ble_auth_req_t xAuth = ESP_LE_AUTH_NO_BOND;
+
+    /* Bondable is an optional flag. */
+    if( bBondableFlag == true )
+    {
+        xAuth |= ESP_LE_AUTH_BOND;
+    }
+
+    /* The other flags are mandatory since only v4.2 stack is supported */
+    xAuth |= ( ESP_LE_AUTH_REQ_MITM | ESP_LE_AUTH_REQ_SC_ONLY );
+
+    return xAuth;
+}
+
+esp_ble_io_cap_t prvConvertPropertiesToESPIO( BTIOtypes_t xPropertyIO )
+{
+    esp_ble_io_cap_t xIocap;
 
     switch( xPropertyIO )
     {
         case eBTIONone:
-            xIocap = BLE_HS_IO_NO_INPUT_OUTPUT;
+            xIocap = ESP_IO_CAP_NONE;
             break;
 
         case eBTIODisplayOnly:
-            xIocap = BLE_HS_IO_DISPLAY_ONLY;
+            xIocap = ESP_IO_CAP_OUT;
             break;
 
         case eBTIODisplayYesNo:
-            xIocap = BLE_HS_IO_DISPLAY_YESNO;
+            xIocap = ESP_IO_CAP_IO;
             break;
 
         case eBTIOKeyboardOnly:
-            xIocap = BLE_HS_IO_KEYBOARD_ONLY;
+            xIocap = ESP_IO_CAP_IN;
             break;
 
         case eBTIOKeyboardDisplay:
-            xIocap = BLE_HS_IO_KEYBOARD_DISPLAY;
+            xIocap = ESP_IO_CAP_KBDISP;
             break;
 
         default:
-            xIocap = BLE_HS_IO_NO_INPUT_OUTPUT;
+            xIocap = ESP_IO_CAP_NONE;
     }
 
     return xIocap;
@@ -217,41 +240,133 @@ uint8_t prvConvertPropertiesToESPIO( BTIOtypes_t xPropertyIO )
 
 BTStatus_t prvSetIOs( BTIOtypes_t xPropertyIO )
 {
-    uint8_t xIocap;
+    esp_ble_io_cap_t xIocap;
+    esp_err_t xESPstatus;
     BTStatus_t xStatus = eBTStatusSuccess;
 
     xIocap = prvConvertPropertiesToESPIO( xPropertyIO );
-    ble_hs_cfg.sm_io_cap = xIocap;
+    xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_IOCAP_MODE, &xIocap, sizeof( uint8_t ) );
+
+    if( xESPstatus != ESP_OK )
+    {
+        xStatus = eBTStatusFail;
+    }
 
     return xStatus;
 }
 
 BTStatus_t prvToggleBondableFlag( bool bEnable )
 {
+    esp_ble_auth_req_t xAuthReq;
+    esp_err_t xESPstatus;
     BTStatus_t xStatus = eBTStatusSuccess;
 
-    ble_hs_cfg.sm_bonding = bEnable;
+    xAuthReq = prvConvertPropertiesToESPAuth( bEnable );
+    xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_AUTHEN_REQ_MODE, &xAuthReq, sizeof( uint8_t ) );
+
+    if( xESPstatus != ESP_OK )
+    {
+        xStatus = eBTStatusFail;
+    }
+
     return xStatus;
 }
 
 BTStatus_t prvToggleSecureConnectionOnlyMode( bool bEnable )
 {
+    uint8_t xAuthOption;
+    esp_err_t xESPstatus;
     BTStatus_t xStatus = eBTStatusSuccess;
 
-    ble_hs_cfg.sm_sc = bEnable;
-    ble_hs_cfg.sm_mitm = 1;
+    if( bEnable == true )
+    {
+        xAuthOption = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_ENABLE;
+        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH, &xAuthOption, sizeof( uint8_t ) );
+
+        /* Check the IO are compatible with the desired security level */
+        if( ( xProperties.xPropertyIO != eBTIODisplayYesNo ) && ( xProperties.xPropertyIO != eBTIOKeyboardDisplay ) )
+        {
+            IotLogError( "BLE: Input/output property are incompatible with secure connection only Mode." );
+        }
+    }
+    else
+    {
+        xAuthOption = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_DISABLE;
+        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH, &xAuthOption, sizeof( uint8_t ) );
+    }
+
+    if( xESPstatus != ESP_OK )
+    {
+        xStatus = eBTStatusFail;
+    }
+
     return xStatus;
 }
 
 BTStatus_t prvBTBleAdapterInit( const BTBleAdapterCallbacks_t * pxCallbacks )
 {
     BTStatus_t xStatus = eBTStatusSuccess;
-
+    esp_err_t xESPstatus = ESP_OK;
+    esp_ble_io_cap_t xIocap;
+    uint8_t xKeySize = 16;
+    uint8_t xInitKey = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    uint8_t xRspKey = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    uint8_t xAuthOption;
+    esp_ble_auth_req_t xAuthReq;
 
     /* set default properties */
     xProperties.bBondable = true;
     xProperties.bSecureConnectionOnly = true;
     xProperties.xPropertyIO = eBTIODisplayYesNo;
+
+    if( xESPstatus == ESP_OK )
+    {
+        xESPstatus = esp_ble_gap_register_callback( prvGAPeventHandler );
+    }
+
+    /* Default initialization for ESP32 */
+    if( xESPstatus == ESP_OK )
+    {
+        xAuthReq = prvConvertPropertiesToESPAuth( xProperties.bBondable );
+        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_AUTHEN_REQ_MODE, &xAuthReq, sizeof( uint8_t ) );
+
+        if( xESPstatus == ESP_OK )
+        {
+            xAuthOption = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_ENABLE;
+            xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH, &xAuthOption, sizeof( uint8_t ) );
+        }
+    }
+
+    if( xESPstatus == ESP_OK )
+    {
+        xIocap = prvConvertPropertiesToESPIO( xProperties.xPropertyIO );
+        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_IOCAP_MODE, &xIocap, sizeof( uint8_t ) );
+    }
+
+    if( xESPstatus == ESP_OK )
+    {
+        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_MAX_KEY_SIZE, &xKeySize, sizeof( uint8_t ) );
+    }
+
+    if( xESPstatus == ESP_OK )
+    {
+        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_MIN_KEY_SIZE, &xKeySize, sizeof( uint8_t ) );
+    }
+
+    if( xESPstatus == ESP_OK )
+    {
+        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_SET_INIT_KEY, &xInitKey, sizeof( uint8_t ) );
+    }
+
+    if( xESPstatus == ESP_OK )
+    {
+        xESPstatus = esp_ble_gap_set_security_param( ESP_BLE_SM_SET_RSP_KEY, &xRspKey, sizeof( uint8_t ) );
+    }
+
+    if( xESPstatus != ESP_OK )
+    {
+        xStatus = eBTStatusFail;
+    }
 
     /*
      * Now set all the properties.
@@ -293,10 +408,7 @@ BTStatus_t prvBTRegisterBleApp( BTUuid_t * pxAppUuid )
 {
     BTStatus_t xStatus = eBTStatusSuccess;
 
-    if( xBTBleAdapterCallbacks.pxRegisterBleAdapterCb != NULL )
-    {
-        xBTBleAdapterCallbacks.pxRegisterBleAdapterCb( eBTStatusSuccess, 0, pxAppUuid );
-    }
+    xBTBleAdapterCallbacks.pxRegisterBleAdapterCb( eBTStatusSuccess, 0, pxAppUuid );
 
     return xStatus;
 }
@@ -391,8 +503,11 @@ BTStatus_t prvBTDisconnect( uint8_t ucAdapterIf,
                             uint16_t usConnId )
 {
     BTStatus_t xStatus = eBTStatusSuccess;
+    esp_bd_addr_t xAddr = { 0 };
 
-    if( ble_gap_terminate( usConnId, BLE_ERR_REM_USER_CONN_TERM ) != 0 )
+    memcpy( xAddr, pxBdAddr->ucAddress, ESP_BD_ADDR_LEN );
+
+    if( esp_ble_gap_disconnect( xAddr ) != ESP_OK )
     {
         xStatus = eBTStatusFail;
     }
@@ -405,29 +520,15 @@ BTStatus_t prvBTDisconnect( uint8_t ucAdapterIf,
 
 BTStatus_t prvBTStartAdv( uint8_t ucAdapterIf )
 {
-    int xESPStatus;
+    esp_err_t xESPStatus = ESP_OK;
     BTStatus_t xStatus = eBTStatusSuccess;
-    uint8_t own_addr_type;
 
-    /* Figure out address to use while advertising */
-    xESPStatus = ble_hs_id_infer_auto( xPrivacy, &own_addr_type );
 
-    if( xESPStatus != 0 )
+    xESPStatus = esp_ble_gap_start_advertising( &xAdv_params );
+
+    if( xESPStatus != ESP_OK )
     {
         xStatus = eBTStatusFail;
-    }
-
-    xESPStatus = ble_gap_adv_start( own_addr_type, NULL, BLE_HS_FOREVER,
-                                    &xAdv_params, prvGAPeventHandler, NULL );
-
-    if( xESPStatus != 0 )
-    {
-        xStatus = eBTStatusFail;
-    }
-
-    if( xBTBleAdapterCallbacks.pxAdvStatusCb != NULL )
-    {
-        xBTBleAdapterCallbacks.pxAdvStatusCb( xStatus, ulGattServerIFhandle, true );
     }
 
     return xStatus;
@@ -438,23 +539,15 @@ BTStatus_t prvBTStartAdv( uint8_t ucAdapterIf )
 
 BTStatus_t prvBTStopAdv( uint8_t ucAdapterIf )
 {
+    esp_err_t xESPStatus = ESP_OK;
     BTStatus_t xStatus = eBTStatusSuccess;
-    int xESPStatus = 0;
 
-    /* Stop advertisement only if no advertisement is active. */
-    if( ble_gap_adv_active() != 0 )
-    {
-        xESPStatus = ble_gap_adv_stop();
-    }
 
-    if( xESPStatus != 0 )
+    xESPStatus = esp_ble_gap_stop_advertising();
+
+    if( xESPStatus != ESP_OK )
     {
         xStatus = eBTStatusFail;
-    }
-
-    if( xBTBleAdapterCallbacks.pxAdvStatusCb != NULL )
-    {
-        xBTBleAdapterCallbacks.pxAdvStatusCb( xStatus, ulGattServerIFhandle, false );
     }
 
     return xStatus;
@@ -525,7 +618,80 @@ BTTransport_t prvBTGetDeviceType( const BTBdaddr_t * pxBdAddr )
     return xStatus;
 }
 
-/*-----------------------------------------------------------*/
+/* According to  https://docs.espressif.com/projects/esp-idf/en/latest/api-reference/bluetooth/controller_vhci.html#_CPPv417esp_power_level_t */
+int prvConvertPowerLevelToDb( esp_power_level_t powerLevel )
+{
+    int dbm;
+
+    switch( powerLevel )
+    {
+        case ESP_PWR_LVL_N12:
+            dbm = -12;
+            break;
+
+        case ESP_PWR_LVL_N9:
+            dbm = -9;
+            break;
+
+        case ESP_PWR_LVL_N6:
+            dbm = -6;
+            break;
+
+        case ESP_PWR_LVL_N3:
+            dbm = -3;
+            break;
+
+        case ESP_PWR_LVL_N0:
+            dbm = 0;
+            break;
+
+        case ESP_PWR_LVL_P3:
+            dbm = 3;
+            break;
+
+        case ESP_PWR_LVL_P6:
+            dbm = 6;
+            break;
+
+        case ESP_PWR_LVL_P9:
+            dbm = 9;
+            break;
+
+        default:
+            dbm = 0;
+            break;
+    }
+
+    return dbm;
+}
+
+/**
+ * @Brief fill up the pucAdvMsg array. Return eBTStatusSuccess in case of success.
+ */
+BTStatus_t prvAddToAdvertisementMessage( uint8_t * pucAdvMsg,
+                                         uint8_t * pucIndex,
+                                         esp_ble_adv_data_type xDType,
+                                         uint8_t * pucData,
+                                         const uint8_t ucDataLength )
+{
+    BTStatus_t xStatus = eBTStatusSuccess;
+
+    if( ( *pucIndex ) + ucDataLength + 1 < ESP_BLE_ADV_DATA_LEN_MAX )
+    {
+        pucAdvMsg[ ( *pucIndex )++ ] = ucDataLength + 1;
+        pucAdvMsg[ ( *pucIndex )++ ] = xDType;
+        memcpy( &pucAdvMsg[ *pucIndex ], pucData, ucDataLength );
+        ( *pucIndex ) += ucDataLength;
+    }
+    else
+    {
+        IotLogError( "Advertising data can't fit in advertisement message." );
+        xStatus = eBTStatusFail;
+    }
+
+    return xStatus;
+}
+
 BTStatus_t prvBTSetAdvData( uint8_t ucAdapterIf,
                             BTGattAdvertismentParams_t * pxParams,
                             uint16_t usManufacturerLen,
@@ -535,171 +701,150 @@ BTStatus_t prvBTSetAdvData( uint8_t ucAdapterIf,
                             BTUuid_t * pxServiceUuid,
                             size_t xNbServices )
 {
-    struct ble_hs_adv_fields fields;
-    const char * name;
-    int xESPStatus;
-    ble_uuid16_t uuid16 = { 0 };
-    ble_uuid32_t uuid32 = { 0 };
-    ble_uuid128_t uuid128 = { 0 };
-
     BTStatus_t xStatus = eBTStatusSuccess;
+    uint8_t ucSlaveConnectInterval[ 4 ];
+    uint8_t ucIndex, ucMessageIndex = 0;
+    uint8_t ucMessageRaw[ ESP_BLE_ADV_DATA_LEN_MAX ];
+    uint8_t ucFlags;
+    uint8_t ucTxPower;
+    esp_err_t xESPErr = ESP_OK;
+    char *pDeviceName;
+    size_t deviceNameLength;
 
-    /**
-     *  Set the advertisement data included in our advertisements:
-     *     o Flags (indicates advertisement type and other general info).
-     *     o Advertising tx power.
-     *     o Device name.
-     *     o 16-bit service UUIDs (alert notifications).
-     */
 
-    memset( &fields, 0, sizeof fields );
+    pDeviceName = prxESPGetBLEDeviceName();
+    deviceNameLength = strlen( pDeviceName );
 
-    /* Advertise two flags:
-     *     o Discoverability in forthcoming advertisement (general)
-     *     o BLE-only (BR/EDR unsupported).
-     */
-    fields.flags = BLE_HS_ADV_F_DISC_GEN |
-                   BLE_HS_ADV_F_BREDR_UNSUP;
-
-    if( pxParams->ulAppearance )
+    if( ( pxParams->ucName.xType == BTGattAdvNameComplete ) || ( IOT_BLE_DEVICE_SHORT_LOCAL_NAME_SIZE >= deviceNameLength ) )
     {
-        fields.appearance = pxParams->ulAppearance;
-        fields.appearance_is_present = 1;
+        prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_NAME_CMPL, ( uint8_t * ) pDeviceName, deviceNameLength );
+    }
+    else if( pxParams->ucName.xType == BTGattAdvNameShort )
+    {
+        prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_NAME_SHORT, ( uint8_t * ) pDeviceName, IOT_BLE_DEVICE_SHORT_LOCAL_NAME_SIZE );
     }
 
-    /* Indicate that the TX power level field should be included; have the
-     * stack fill this value automatically.  This is done by assiging the
-     * special value BLE_HS_ADV_TX_PWR_LVL_AUTO.
-     */
-    fields.tx_pwr_lvl_is_present = pxParams->bIncludeTxPower;
-
-    if( fields.tx_pwr_lvl_is_present )
+    if( ( pxParams->bIncludeTxPower == true ) && ( xStatus == eBTStatusSuccess ) )
     {
-        fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+        ucTxPower = prvConvertPowerLevelToDb( esp_ble_tx_power_get( ESP_BLE_PWR_TYPE_ADV ) );
+        xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_TX_PWR, &ucTxPower, 1 );
     }
 
-    if( pxParams->ucName.xType != BTGattAdvNameNone )
+    if( ( xStatus == eBTStatusSuccess ) && ( pxParams->ulAppearance != 0 ) )
     {
-        name = ble_svc_gap_device_name();
-        fields.name = ( uint8_t * ) name;
+        xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_APPEARANCE, ( uint8_t * ) &pxParams->ulAppearance, 4 );
+    }
 
-        if( pxParams->ucName.xType == BTGattAdvNameShort )
+    if( ( xStatus == eBTStatusSuccess ) && ( pxParams->ulMinInterval != 0 ) && ( pxParams->ulMaxInterval != 0 ) )
+    {
+        ucSlaveConnectInterval[ 0 ] = ( pxParams->ulMinInterval ) & 0xFF;
+        ucSlaveConnectInterval[ 1 ] = ( pxParams->ulMinInterval >> 8 ) & 0xFF;
+        ucSlaveConnectInterval[ 2 ] = ( pxParams->ulMaxInterval ) & 0xFF;
+        ucSlaveConnectInterval[ 3 ] = ( pxParams->ulMaxInterval >> 8 ) & 0xFF;
+        xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_INT_RANGE, ucSlaveConnectInterval, 4 );
+    }
+
+    if( ( xStatus == eBTStatusSuccess ) && ( pxParams->bSetScanRsp == false ) )
+    {
+        ucFlags = ( ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT );
+        xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_FLAG, &ucFlags, 1 );
+    }
+
+    if( ( pcManufacturerData != NULL ) && ( xStatus == eBTStatusSuccess ) )
+    {
+        xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_MANUFACTURER_SPECIFIC_TYPE, ( uint8_t * ) pcManufacturerData, usManufacturerLen );
+    }
+
+    if( ( pcServiceData != NULL ) && ( xStatus == eBTStatusSuccess ) )
+    {
+        xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_SERVICE_DATA, ( uint8_t * ) pcServiceData, usServiceDataLen );
+    }
+
+    if( ( xNbServices != 0 ) && ( xStatus == eBTStatusSuccess ) )
+    {
+        for( ucIndex = 0; ucIndex < xNbServices; ucIndex++ )
         {
-            fields.name_len = strlen( name );
-
-            if( pxParams->ucName.ucShortNameLen < fields.name_len )
+            switch( pxServiceUuid[ ucIndex ].ucType )
             {
-                fields.name_len = pxParams->ucName.ucShortNameLen;
+                case eBTuuidType16:
+                    xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_16SRV_PART, ( uint8_t * ) &pxServiceUuid[ ucIndex ].uu.uu16, 2 );
+                    break;
+
+                case eBTuuidType32:
+                    xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_32SRV_PART, ( uint8_t * ) &pxServiceUuid[ ucIndex ].uu.uu32, 4 );
+                    break;
+
+                case eBTuuidType128:
+                    xStatus = prvAddToAdvertisementMessage( ucMessageRaw, &ucMessageIndex, ESP_BLE_AD_TYPE_128SRV_PART, pxServiceUuid[ ucIndex ].uu.uu128, bt128BIT_UUID_LEN );
+                    break;
             }
 
-            fields.name_is_complete = 0;
+            if( xStatus != eBTStatusSuccess )
+            {
+                break;
+            }
+        }
+    }
+
+    if( xStatus == eBTStatusSuccess )
+    {
+        xAdv_params.channel_map = ADV_CHNL_ALL;
+        xAdv_params.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY;
+
+        if( pxParams->usMinAdvInterval != 0 )
+        {
+            xAdv_params.adv_int_min = pxParams->usMinAdvInterval;
         }
         else
         {
-            fields.name_len = strlen( name );
-            fields.name_is_complete = 1;
+            xAdv_params.adv_int_min = IOT_BLE_ADVERTISING_INTERVAL;
         }
-    }
 
-    if( usManufacturerLen && pcManufacturerData )
-    {
-        fields.mfg_data = ( uint8_t * ) pcManufacturerData;
-        fields.mfg_data_len = usManufacturerLen;
-    }
-
-
-    if( ( pxParams->ulMinInterval != 0 ) && ( pxParams->ulMaxInterval != 0 ) )
-    {
-        uint8_t slave_itvl_range[ 4 ];
-        slave_itvl_range[ 0 ] = ( pxParams->ulMinInterval ) & 0xFF;
-        slave_itvl_range[ 1 ] = ( pxParams->ulMinInterval >> 8 ) & 0xFF;
-        slave_itvl_range[ 2 ] = ( pxParams->ulMaxInterval ) & 0xFF;
-        slave_itvl_range[ 3 ] = ( pxParams->ulMaxInterval >> 8 ) & 0xFF;
-        fields.slave_itvl_range = slave_itvl_range;
-    }
-
-    if( usServiceDataLen && pcServiceData )
-    {
-        fields.svc_data_uuid128 = ( uint8_t * ) pcServiceData;
-        fields.svc_data_uuid128_len = usServiceDataLen;
-    }
-
-    if( pxServiceUuid != NULL )
-    {
-        if( pxServiceUuid->ucType == eBTuuidType16 )
+        if( pxParams->usMaxAdvInterval != 0 )
         {
-            uuid16.u.type = BLE_UUID_TYPE_16;
-            uuid16.value = pxServiceUuid->uu.uu16;
-            fields.uuids16 = &uuid16;
-            fields.num_uuids16 = 1;
-            fields.uuids16_is_complete = 1;
+            xAdv_params.adv_int_max = pxParams->usMaxAdvInterval;
         }
-        else if( pxServiceUuid->ucType == eBTuuidType32 )
+        else
         {
-            uuid32.u.type = BLE_UUID_TYPE_32;
-            uuid16.value = pxServiceUuid->uu.uu32;
-            fields.uuids32 = &uuid32;
-            fields.num_uuids32 = 1;
-            fields.uuids32_is_complete = 1;
+            xAdv_params.adv_int_max = ( 2 * IOT_BLE_ADVERTISING_INTERVAL );
         }
-        else if( pxServiceUuid->ucType == eBTuuidType128 )
+
+        if( pxParams->usAdvertisingEventProperties == BTAdvInd )
         {
-            uuid128.u.type = BLE_UUID_TYPE_128;
-            memcpy( uuid128.value, pxServiceUuid->uu.uu128, sizeof( pxServiceUuid->uu.uu128 ) );
-            fields.uuids128 = &uuid128;
-            fields.num_uuids128 = 1;
-            fields.uuids128_is_complete = 1;
+            xAdv_params.adv_type = ADV_TYPE_IND;
         }
-    }
 
-    xAdv_params.itvl_min = ( IOT_BLE_ADVERTISING_INTERVAL * 1000 ) / ( BLE_HCI_ADV_ITVL );
-    xAdv_params.itvl_max = ( IOT_BLE_ADVERTISING_INTERVAL * 2 * 1000 ) / ( BLE_HCI_ADV_ITVL );
+        if( pxParams->usAdvertisingEventProperties == BTAdvNonconnInd )
+        {
+            xAdv_params.adv_type = ADV_TYPE_NONCONN_IND;
+        }
 
-    if( pxParams->usAdvertisingEventProperties == BTAdvInd )
-    {
-        xAdv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-        xAdv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    }
+        xAdv_params.own_addr_type = pxParams->xAddrType;
 
-    if( pxParams->usAdvertisingEventProperties == BTAdvDirectInd )
-    {
-        xAdv_params.conn_mode = BLE_GAP_CONN_MODE_DIR;
-        /* fixme: set adv_params->high_duty_cycle accordingly */
-    }
+        if( pxParams->bSetScanRsp == true )
+        {
+            xESPErr = esp_ble_gap_config_scan_rsp_data_raw( ucMessageRaw, ucMessageIndex );
 
-    if( pxParams->usAdvertisingEventProperties == BTAdvNonconnInd )
-    {
-        xAdv_params.conn_mode = BLE_GAP_CONN_MODE_NON;
-        xAdv_params.disc_mode = BLE_GAP_DISC_MODE_NON;
-    }
+            if( xESPErr != ESP_OK )
+            {
+                IotLogError( "Failed to configure scan response." );
+                xStatus = eBTStatusFail;
+            }
+        }
+        else
+        {
+            xESPErr = esp_ble_gap_config_adv_data_raw( ucMessageRaw, ucMessageIndex );
 
-    if( pxParams->xAddrType == BTAddrTypeResolvable )
-    {
-        xPrivacy = true;
-    }
-
-    if( pxParams->bSetScanRsp )
-    {
-        xESPStatus = ble_gap_adv_rsp_set_fields( &fields );
-    }
-    else
-    {
-        xESPStatus = ble_gap_adv_set_fields( &fields );
-    }
-
-    if( xESPStatus != 0 )
-    {
-        xStatus = eBTStatusFail;
-    }
-
-    if( xBTBleAdapterCallbacks.pxSetAdvDataCb != NULL )
-    {
-        xBTBleAdapterCallbacks.pxSetAdvDataCb( xStatus );
+            if( xESPErr != ESP_OK )
+            {
+                IotLogError( "Failed to configure Advertisement message." );
+                xStatus = eBTStatusFail;
+            }
+        }
     }
 
     return xStatus;
 }
-
 
 /*-----------------------------------------------------------*/
 
@@ -720,23 +865,19 @@ BTStatus_t prvBTConnParameterUpdateRequest( const BTBdaddr_t * pxBdAddr,
                                             uint32_t ulLatency,
                                             uint32_t ulTimeout )
 {
+    esp_err_t xESPstatus = ESP_OK;
     BTStatus_t xStatus = eBTStatusSuccess;
-    struct ble_gap_upd_params xParams =
-    {
-        .itvl_min            = BLE_GAP_INITIAL_CONN_ITVL_MIN,
-        .itvl_max            = BLE_GAP_INITIAL_CONN_ITVL_MAX,
-        .latency             = BLE_GAP_INITIAL_CONN_LATENCY,
-        .supervision_timeout = BLE_GAP_INITIAL_SUPERVISION_TIMEOUT,
-        .min_ce_len          = BLE_GAP_INITIAL_CONN_MIN_CE_LEN,
-        .max_ce_len          = BLE_GAP_INITIAL_CONN_MAX_CE_LEN,
-    };
+    esp_ble_conn_update_params_t xParams;
 
-    xParams.itvl_min = ulMinInterval;
-    xParams.itvl_max = ulMaxInterval;
     xParams.latency = ulLatency;
-    xParams.supervision_timeout = ulTimeout;
+    xParams.max_int = ulMaxInterval;
+    xParams.min_int = ulMinInterval;
+    xParams.timeout = ulTimeout;
+    memcpy( xParams.bda, pxBdAddr->ucAddress, btADDRESS_LEN );
 
-    if( ble_gap_update_params( usGattConnHandle, &xParams ) != 0 )
+    xESPstatus = esp_ble_gap_update_conn_params( &xParams );
+
+    if( xESPstatus != ESP_OK )
     {
         xStatus = eBTStatusFail;
     }
@@ -760,7 +901,7 @@ BTStatus_t prvBTSetScanParameters( uint8_t ucAdapterIf,
 /*-----------------------------------------------------------*/
 
 BTStatus_t prvBTMultiAdvEnable( uint8_t ucAdapterIf,
-                                BTGattAdvertismentParams_t * xAdvParams )
+                                BTGattAdvertismentParams_t * pxAdvParams )
 {
     BTStatus_t xStatus = eBTStatusUnsupported;
 
@@ -771,7 +912,7 @@ BTStatus_t prvBTMultiAdvEnable( uint8_t ucAdapterIf,
 /*-----------------------------------------------------------*/
 
 BTStatus_t prvBTMultiAdvUpdate( uint8_t ucAdapterIf,
-                                BTGattAdvertismentParams_t * advParams )
+                                BTGattAdvertismentParams_t * pxAdvParams )
 {
     BTStatus_t xStatus = eBTStatusUnsupported;
 
