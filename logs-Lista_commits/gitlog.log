@@ -1,14 +1,14 @@
-| COMMIT    | AUTHOR             | MONTH | DAY | YEAR |
-| --------- | ------------------ | ----- | --- | ---- |
-| 3dd52074e | Cobus van Eeden    | Jul   | 31  | 2019 |12<-
-| 6144acbe6 | alexa@aws          | Jun   | 28  | 2019 |11<-
-| 99c3a60de | dhs                | May   | 31  | 2019 |10<-
-| bebf8423d | Mark R Tuttle      | Apr   | 30  | 2019 |9<-
-| 07837f764 | Yuhui Zheng        | Mar   | 31  | 2019 |8<-
-| dfe2c1c98 | alexa@aws          | Feb   | 28  | 2019 |7<-
-| 5541634ce | Mahavir Jain       | Jan   | 31  | 2019 |6<-
-| 5497db65a | Sarena Meas        | Dec   | 28  | 2018 |5<-
-| 74830d72c | hugues             | Nov   | 30  | 2018 |4<-
-| 065ac6722 | William Ransohoff  | Oct   | 17  | 2018 |3<-
-| 8b6f1577b | Gaurav Aggarwal    | Aug   | 29  | 2018 |2<-
-| 413f30f65 | Tiangang Song      | Jul   | 31  | 2018 |1<-
+| COMMIT    | AUTHOR             | MONTH | DAY | YEAR | NUMBER MONTH |
+| --------- | ------------------ | ----- | --- | ---- | ------------ |
+| 3dd52074e | Cobus van Eeden    | Jul   | 31  | 2019 | 12<-         |
+| 6144acbe6 | alexa@aws          | Jun   | 28  | 2019 | 11<-         |
+| 99c3a60de | dhs                | May   | 31  | 2019 | 10<-         |
+| bebf8423d | Mark R Tuttle      | Apr   | 30  | 2019 | 9<-          |
+| 07837f764 | Yuhui Zheng        | Mar   | 31  | 2019 | 8<-          |
+| dfe2c1c98 | alexa@aws          | Feb   | 28  | 2019 | 7<-          |
+| 5541634ce | Mahavir Jain       | Jan   | 31  | 2019 | 6<-          |
+| 5497db65a | Sarena Meas        | Dec   | 28  | 2018 | 5<-          |
+| 74830d72c | hugues             | Nov   | 30  | 2018 | 4<-          |
+| 065ac6722 | William Ransohoff  | Oct   | 17  | 2018 | 3<-          |
+| 8b6f1577b | Gaurav Aggarwal    | Aug   | 29  | 2018 | 2<-          |
+| 413f30f65 | Tiangang Song      | Jul   | 31  | 2018 | 1<-          |
